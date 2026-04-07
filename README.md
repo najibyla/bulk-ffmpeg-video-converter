@@ -1,63 +1,76 @@
-A high-performance Bash script designed for bulk video conversion and resizing in parallel. This script is optimized for **Windows (Git Bash)**, **macOS**, and **Linux** environments.
+A high-performance, **highly configurable** Bash script designed for bulk video conversion and resizing in parallel. Optimized for **Windows (Git Bash)**, **macOS**, and **Linux**.
 
-## 🚀 Main Features
+## 🚀 New in v2: Modular Configuration
 
-- **Intelligent Parallelization**: Automatically detects the number of CPU cores to process multiple videos simultaneously (tested on configurations with up to 28 cores) .
+The script now features a dedicated **Configuration Section** at the top of the file. You can easily customize:
+
+- **Default values**: Extension, target height, and output subdirectory.
     
-- **Hardware Acceleration**: Automatically detects and utilizes the best available hardware encoders: **NVIDIA NVENC**, **Intel QuickSync (QSV)**, **Apple VideoToolbox**, or falls back to **libx264**.
+- **Input Formats**: Add or remove source extensions (mp4, mkv, avi, etc.) via a dynamic array.
     
-- **Precise Ratio Calculation**: Maintains the original aspect ratio by automatically rounding to the nearest even width (required by H.264) using `awk`.
+- **Encoder Presets**: Fine-tune quality settings for **NVENC**, **QSV**, **VideoToolbox**, and **libx264** without touching the core logic.
     
-    - Formula: $target\_w = \text{round}\left(\frac{src\_w \times target\_h}{src\_h \times 2}\right) \times 2$.
+- **Muxer Options**: Specific flags for MP4 (faststart), MKV, and TS containers.
+    
+
+## ✨ Key Features
+
+- **Intelligent Parallelization**: Automatically detects CPU cores and processes multiple videos simultaneously (tested up to 28 cores).
+    
+- **Auto-Detection of Hardware Acceleration**:
+    
+    - **NVIDIA NVENC** (HEVC/H.264)
         
-- **Windows/Git Bash Robustness**: Systematically cleans metadata to prevent "integer expression expected" errors caused by invisible carriage return characters (`\r`) often returned by FFprobe on Windows .
+    - **Intel QuickSync (QSV)**
+        
+    - **Apple VideoToolbox**
+        
+    - **libx264** (Software fallback)
+        
+- **Precise Aspect Ratio**: Uses `awk` to calculate dimensions, ensuring the width is always an **even number** (required for H.264 compatibility).
+    
+    - _Formula_: $target\_w = \text{round}\left(\frac{src\_w \times target\_h}{src\_h \times 2}\right) \times 2$
+        
+- **Bulletproof Filename Handling**: Uses `printf %q` and `find -print0` to safely process files with spaces, apostrophes, and special characters.
     
 - **Data Safety**:
     
-    - Uses `.tmp` files during processing to prevent corrupted files from being marked as "complete" if the process is interrupted .
+    - Converts to `.tmp` files first to prevent half-finished files in case of interruption.
         
-    - Automatic cleanup of temporary files via a `trap` on system signals (EXIT, INT, TERM) .
+    - **Trap System**: Automatically deletes partial `.tmp` files if the script is stopped (Ctrl+C).
         
-    - Handles complex filenames containing spaces, apostrophes, and special characters.
-        
-- **Audio Optimization**: AAC 96k encoding with automatic stereo downmixing for multichannel sources.
+- **Audio Optimization**: AAC encoding with a configurable bitrate and automatic downmixing to stereo for multichannel sources.
     
 
 ## 🛠 Prerequisites
 
-The script requires the following tools to be installed and available in your `PATH`:
+Ensure these are in your `PATH`:
 
-- **FFmpeg** & **FFprobe**.
+- **FFmpeg** & **FFprobe**
     
-- **AWK** (for dimension calculations).
+- **AWK** (Standard on most Unix systems)
     
-- **Bash** (v3.2 or higher).
+- **Bash** (v3.2 or higher)
     
 
 ---
 
 ## 💻 Installation & Setup (Windows)
 
-To run this script on Windows, you need a Bash environment and FFmpeg correctly configured.
-
 ### 1. Install Git Bash
 
-Git Bash provides the Unix-like environment necessary to run `.sh` scripts.
+Required to run `.sh` scripts on Windows.
 
-- **Download**: Visit [git-scm.com](https://git-scm.com/download/win).
+- **Download**: [git-scm.com](https://git-scm.com/download/win).
     
-- **Install**: Run the `.exe`.
-    
-- **Crucial Step**: During installation, select **"Checkout Windows-style, commit Unix-style line endings"** to avoid script syntax errors.
+- **Crucial**: During install, select **"Checkout Windows-style, commit Unix-style line endings"**.
     
 
-### 2. Install Chocolatey (Package Manager)
+### 2. Install FFmpeg (via Chocolatey)
 
-Chocolatey allows you to install FFmpeg easily and manages your system PATH automatically.
+The easiest way to manage FFmpeg on Windows.
 
-- Open **PowerShell** as an **Administrator**.
-    
-- Run the following command:
+- Open **PowerShell (Admin)** and run:
     
     PowerShell
     
@@ -65,24 +78,20 @@ Chocolatey allows you to install FFmpeg easily and manages your system PATH auto
     Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
     ```
     
-- Restart your terminal.
+- Then install FFmpeg:
     
-
-### 3. Install FFmpeg
-
-Once Chocolatey is installed, run this command in an Admin PowerShell:
-
-PowerShell
-
-```
-choco install ffmpeg
-```
+    PowerShell
+    
+    ```
+    choco install ffmpeg
+    ```
+    
 
 ---
 
 ## 📖 Usage
 
-The script scans all subdirectories of the current folder and places converted videos into a subfolder named `0` inside each parent directory.
+The script scans subdirectories and places results in a folder named `0` (configurable).
 
 ### Syntax
 
@@ -92,41 +101,36 @@ Bash
 ./ffmpegFinal [extension] [target_height]
 ```
 
-- **`extension`**: The desired output extension (mp4, mkv, ts, etc.). Default is `.m4v`.
-    
-- **`target_height`**: The target height in pixels. Default is `540`.
-    
-
 ### Examples
 
 Bash
 
 ```
-./ffmpegFinal               # Converts to .m4v (540p) by default
-./ffmpegFinal mp4 720       # Converts to .mp4 (720p)
-./ffmpegFinal --help        # Shows detailed help
+./ffmpegFinal               # Default: .m4v at 540p
+./ffmpegFinal mp4 720       # Target: .mp4 at 720p
+./ffmpegFinal --help        # View options and defaults
 ```
 
-## 📊 Logging & Summary
+## 📊 Technical Presets (v6.4 Defaults)
 
-A timestamped log file is generated for each run (e.g., `conversion_20260401_132201.log`). It contains:
+|**Encoder**|**Default Settings**|
+|---|---|
+|**NVIDIA NVENC**|VBR, CQ 23, Preset P4|
+|**Intel QSV**|Global Quality 23|
+|**Apple VideoToolbox**|Quality 65|
+|**Software (x264)**|CRF 22, Preset Medium|
 
-- The detected encoder and the number of cores used .
+## 📝 Logging
+
+A log file (e.g., `conversion_20260407_150000.log`) is created for every session, providing a detailed breakdown of:
+
+- Encoder used & CPU Core count.
     
-- Timestamped details of successes (`[OK]`) and failures (`[ERREUR]`) .
+- Per-file status: `[OK]` or `[ERREUR]`.
     
-- A final summary (total count of successes vs. errors) .
+- Final summary of processed files.
     
 
-## ⚙️ Technical Details (Encoders)
+---
 
-| **Encoder**            | **Quality Settings**  |
-| ---------------------- | --------------------- |
-| **NVIDIA NVENC**       | VBR, CQ 23, Preset P4 |
-| **Intel QSV**          | Global Quality 23     |
-| **Apple VideoToolbox** | Quality 65            |
-| **CPU (libx264)**      | CRF 22, Preset Medium |
-
-
-Note: This script was designed to be both powerful and low-maintenance.
-For any suggestions or bug reports, please feel free to open an issue.
+**Note**: This script is designed for high-performance production environments. For bug reports or feature requests, please open an issue on the repository.

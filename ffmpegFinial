@@ -1,0 +1,253 @@
+#!/bin/bash
+# --- Ultimate FFmpeg Script v2 (Configurable & Robust) ---
+
+# ==================== SECTION CONFIGURATION ====================
+# Modifiez les valeurs ci-dessous selon vos besoins.
+
+# --- Paramètres généraux ---
+DEFAULT_EXTENSION="m4v"          # Extension de sortie par défaut (sans le point)
+DEFAULT_TARGET_HEIGHT=540        # Hauteur cible par défaut (pixels)
+OUTPUT_SUBDIR="0"                # Sous-dossier de sortie créé dans chaque répertoire
+LOG_FILE_PREFIX="conversion"     # Préfixe du fichier de log (date-heure sera ajouté)
+
+# --- Extensions de fichiers d'entrée à traiter ---
+# Liste des extensions (sans point) qui seront cherchées dans chaque dossier.
+INPUT_EXTENSIONS=("mp4" "mkv" "avi" "mov" "ts")
+
+# --- Paramètres encodeur logiciel (libx264) ---
+X264_CRF=22                      # Qualité (plus bas = meilleur, 18-28 typique)
+X264_PRESET="medium"             # medium, fast, slow, etc.
+
+# --- Paramètres encodeur matériel NVENC (NVIDIA) ---
+NVENC_RC="vbr"                   # Rate control : vbr, cbr, constqp
+NVENC_CQ=23                      # Niveau de qualité (const quality)
+NVENC_BITRATE="0"                # Débit cible (0 = géré par CQ)
+NVENC_PRESET="p4"                # p1 (fast) à p7 (slow)
+
+# --- Paramètres encodeur matériel QSV (Intel) ---
+QSV_GLOBAL_QUALITY=23            # Qualité globale (similaire à CRF)
+
+# --- Paramètres encodeur matériel VideoToolbox (Apple) ---
+VIDEOTOOLBOX_QUALITY=65          # Qualité (0-100, plus bas = meilleur)
+
+# --- Paramètres audio ---
+AUDIO_CODEC="aac"                # Codec audio
+AUDIO_BITRATE="96k"              # Débit audio
+AUDIO_DOWNMIX_THRESHOLD=2        # Si canaux > cette valeur, on downmix en stéréo
+AUDIO_DOWNMIX_CHANNELS=2         # Nombre de canaux après downmix
+
+# --- Options de muxage selon l'extension de sortie (tableaux pour éviter le word splitting) ---
+# Pour les conteneurs MP4/M4V/MOV : ajout de faststart (streaming)
+MUX_OPTS_MP4=("-movflags" "+faststart")
+# Pour MKV : pas d'option particulière (tableau vide)
+MUX_OPTS_MKV=()
+# Pour TS : pas d'option particulière
+MUX_OPTS_TS=()
+
+# --- Comportement du parallélisme ---
+PARALLEL_SLEEP=0.5               # Temps d'attente (secondes) entre vérifications des jobs
+
+# ==================== FIN CONFIGURATION ====================
+
+shopt -s nullglob 
+
+usage() { 
+    echo "Usage: $0 [extension] [target_height]"
+    echo "Options:"
+    echo "  [extension]      Défaut: $DEFAULT_EXTENSION"
+    echo "  [target_height]  Défaut: $DEFAULT_TARGET_HEIGHT"
+    echo ""
+    echo "Exemples:"
+    echo "  $0               # Convertit en .${DEFAULT_EXTENSION} ${DEFAULT_TARGET_HEIGHT}p"
+    echo "  $0 mp4 720       # Convertit en .mp4 720p"
+    exit 1
+}
+
+# 1. Vérification de l'aide immédiate (évite la création de fichiers inutiles)
+[[ "$1" == "-h" || "$1" == "--help" ]] && usage
+
+# 2. Initialisation des logs après le check de l'aide
+LOG_FILE="${LOG_FILE_PREFIX}_$(date +%Y%m%d_%H%M%S).log"
+
+check_dependencies() { 
+    for cmd in ffmpeg ffprobe awk; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo "Erreur : $cmd manquant." | tee -a "$LOG_FILE" >&2
+            exit 1
+        fi
+    done
+}
+
+detect_best_encoder() { 
+    local enc
+    enc=$(ffmpeg -encoders 2>/dev/null)
+    if echo "$enc" | grep -q "h264_nvenc"; then echo "h264_nvenc"
+    elif echo "$enc" | grep -q "h264_videotoolbox"; then echo "h264_videotoolbox"
+    elif echo "$enc" | grep -q "h264_qsv"; then echo "h264_qsv"
+    else echo "libx264"; fi
+}
+
+process_video() {
+    local input="$1"
+    local output="$2"
+    local target_h="$3"
+    local encoder="$4"
+    local ext="$5"
+    local output_tmp="${output}.tmp"
+    local quoted_tmp
+
+    # Nettoyage sécurisé du fichier temporaire
+    printf -v quoted_tmp '%q' "$output_tmp"
+    trap "rm -f $quoted_tmp" EXIT INT TERM
+
+    # Récupération des métadonnées
+    local src_w src_h src_a
+    src_w=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$input" | tr -d -c '0-9')
+    src_h=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | tr -d -c '0-9')
+    src_a=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$input" 2>/dev/null | tr -d -c '0-9')
+    
+    src_w=${src_w:-0}
+    src_h=${src_h:-0}
+    src_a=${src_a:-0}
+
+    if [ "$src_h" -eq 0 ]; then return 1; fi
+
+    # Calcul de largeur (arrondi au pair le plus proche)
+    local target_w
+    target_w=$(awk "BEGIN { print int(($src_w * $target_h / $src_h) / 2 + 0.5) * 2 }" 2>/dev/null | tr -d -c '0-9')
+    target_w=${target_w:-0}
+
+    if [ "$target_w" -eq 0 ]; then return 1; fi
+
+    local opts=("-nostdin" "-i" "$input" "-vf" "scale=$target_w:$target_h")
+
+    # Configuration selon l'encodeur détecté (valeurs issues de la section config)
+    case "$encoder" in
+        h264_nvenc)
+            opts+=("-c:v" "h264_nvenc" "-rc" "$NVENC_RC" "-cq" "$NVENC_CQ" "-b:v" "$NVENC_BITRATE" "-preset" "$NVENC_PRESET")
+            ;;
+        h264_qsv)
+            opts+=("-c:v" "h264_qsv" "-global_quality" "$QSV_GLOBAL_QUALITY")
+            ;;
+        h264_videotoolbox)
+            opts+=("-c:v" "h264_videotoolbox" "-q:v" "$VIDEOTOOLBOX_QUALITY")
+            ;;
+        *)
+            opts+=("-c:v" "libx264" "-crf" "$X264_CRF" "-preset" "$X264_PRESET")
+            ;;
+    esac
+
+    # Gestion Audio (AAC avec bitrate configurable, downmix si > seuil)
+    if [ "$src_a" -gt 0 ]; then
+        if [ "$src_a" -gt "$AUDIO_DOWNMIX_THRESHOLD" ]; then
+            opts+=("-c:a" "$AUDIO_CODEC" "-b:a" "$AUDIO_BITRATE" "-ac" "$AUDIO_DOWNMIX_CHANNELS")
+        else
+            opts+=("-c:a" "$AUDIO_CODEC" "-b:a" "$AUDIO_BITRATE")
+        fi
+    fi
+
+    # Muxer explicite selon l'extension de sortie (avec options personnalisées, tableau)
+    case "${ext}" in 
+        .mp4|.m4v|.mov)
+            opts+=("-f" "mp4")
+            opts+=("${MUX_OPTS_MP4[@]}")
+            ;;
+        .mkv)
+            opts+=("-f" "matroska")
+            opts+=("${MUX_OPTS_MKV[@]}")
+            ;;
+        .ts)
+            opts+=("-f" "mpegts")
+            opts+=("${MUX_OPTS_TS[@]}")
+            ;;
+    esac
+    
+    opts+=("-y" "$output_tmp")
+
+    if ffmpeg -v error "${opts[@]}"; then
+        mv "$output_tmp" "$output"
+        return 0
+    else
+        return 1 # Le trap s'occupe de rm -f
+    fi
+}
+
+main() {
+    check_dependencies 
+
+    local ext_arg ext target_h encoder cores base_name target_file ok errors
+    
+    # Utilisation des arguments ou des valeurs par défaut
+    ext_arg="${1:-$DEFAULT_EXTENSION}"
+    ext=".$(echo "$ext_arg" | tr '[:upper:]' '[:lower:]' | sed 's/^\.//')"
+    target_h="${2:-$DEFAULT_TARGET_HEIGHT}"
+    encoder=$(detect_best_encoder)
+    
+    # Détection des cœurs (Windows/Linux/Mac)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        cores=$(sysctl -n hw.ncpu)
+    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+        cores=${NUMBER_OF_PROCESSORS:-1}
+    else
+        cores=$(nproc 2>/dev/null || echo 1)
+    fi
+
+    echo "--- Session : $(date) | Encodeur : $encoder | Cœurs : $cores ---" | tee -a "$LOG_FILE"
+
+    # Construction des arguments pour find (une seule fois, en dehors de la boucle)
+    local find_ext_args=()
+    for ext_in in "${INPUT_EXTENSIONS[@]}"; do
+        find_ext_args+=(-o -iname "*.$ext_in")
+    done
+    # Supprimer le premier "-o" (l'élément à l'index 0)
+    if [ ${#find_ext_args[@]} -gt 0 ]; then
+        find_ext_args=("${find_ext_args[@]:1}")
+    fi
+
+    for dir in ./*/; do
+        dir="${dir%/}"
+        [ -d "$dir" ] || continue
+        mkdir -p "$dir/$OUTPUT_SUBDIR"
+
+        while IFS= read -r -d '' video; do
+            [ -f "$video" ] || continue
+            
+            base_name=$(basename "$video")
+            target_file="$dir/$OUTPUT_SUBDIR/${base_name%.*}$ext"
+            
+            [ -f "$target_file" ] && continue
+
+            echo "[EN COURS] $base_name"
+
+            (
+                if process_video "$video" "$target_file" "$target_h" "$encoder" "$ext"; then
+                    echo "[OK] $base_name"
+                    echo "[OK] $(date +%H:%M:%S) | $video" >> "$LOG_FILE"
+                else
+                    { echo "[ERREUR] $(date) | $base_name"; } | tee -a "$LOG_FILE" >&2
+                fi
+            ) &
+
+            # Limitation du parallélisme
+            while [ "$(jobs -r | wc -l)" -ge "$cores" ]; do sleep "$PARALLEL_SLEEP"; done
+        done < <(find "$dir" -maxdepth 1 -type f \( "${find_ext_args[@]}" \) -print0)
+    done
+
+    wait
+    
+    # Résumé
+    ok=$(grep -c "^\[OK\]" "$LOG_FILE" 2>/dev/null)
+    ok=${ok:-0}
+    errors=$(grep -c "^\[ERREUR\]" "$LOG_FILE" 2>/dev/null)
+    errors=${errors:-0}
+    
+    echo "--- Session terminée : $(date) ---" | tee -a "$LOG_FILE"
+    
+    if [ "$ok" -eq 0 ] && [ "$errors" -eq 0 ]; then
+        echo "--- Résumé : Aucun fichier à traiter ---" | tee -a "$LOG_FILE"
+    else
+        echo "--- Résumé : $ok succès, $errors erreur(s) ---" | tee -a "$LOG_FILE"
+    fi
+}
+
+main "$1" "$2"
